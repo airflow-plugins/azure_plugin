@@ -37,6 +37,10 @@ class S3ToAzureDWOperator(BaseOperator):
                                     "rebuild", and "upsert". Defaults to
                                     "append."
     :type load_type:                string
+    :param missing_key_as:          If a key is found that is not specified in
+                                    the schema, this parameter determines the
+                                    default datatype it should be set to.
+    :type missing_key_as:           string
     :param primary_key:             *(optional)* The primary key for the
                                     destination table. Only required if using
                                     a load_type of "upsert".
@@ -63,6 +67,7 @@ class S3ToAzureDWOperator(BaseOperator):
                  schema_location='s3',
                  origin_datatype=None,
                  load_type='append',
+                 missing_key_as=None,
                  primary_key=None,
                  incremental_key=None,
                  *args,
@@ -77,6 +82,7 @@ class S3ToAzureDWOperator(BaseOperator):
         self.origin_schema = origin_schema
         self.origin_datatype = origin_datatype
         self.load_type = load_type
+        self.missing_key_as = missing_key_as
         self.primary_key = [key.lower() for key in primary_key] if primary_key is not None else None
         self.incremental_key = incremental_key.lower() if incremental_key is not None else None
 
@@ -214,14 +220,6 @@ class S3ToAzureDWOperator(BaseOperator):
         target_fields = ', '.join([field.lower() for field in existing_columns])
         placeholders = ','.join(['?' for i in range(len(existing_columns))])
 
-        insert_query = \
-          """
-          INSERT INTO {schema}.{table} ({columns})
-          VALUES ({placeholders})
-          """.format(schema=self.azure_schema,
-                     table=loading_table,
-                     columns=target_fields,
-                     placeholders=placeholders)
         # Split the incoming JSON newlines string along new lines.
         # Remove cases where two or more '\n' results in empty entries.
         records = [json.loads(record) for record in data.split('\n') if record]
@@ -237,8 +235,6 @@ class S3ToAzureDWOperator(BaseOperator):
 
         for field in existing_columns:
             default_object[field.lower()] = None
-
-        print(default_object)
 
         # Initialize null to Nonetype for incoming null values in records dict
         null = None
@@ -256,7 +252,38 @@ class S3ToAzureDWOperator(BaseOperator):
 
         logging.info('Key Count: ' + str(len(keys)))
         logging.info('Field Count: ' + str(len(existing_columns)))
-        logging.info('Missing Keys: ' + str(list(set(keys) - set(existing_columns))))
+
+        missing_keys = list(set(keys) - set(existing_columns))
+        logging.info('Missing Keys: ' + str(missing_keys))
+
+        if missing_keys and self.missing_key_as:
+            new_columns = []
+            new_fields = ''
+            new_placeholders = ''
+            for key in missing_keys:
+                new_columns.append('{} {}'.format(key, self.missing_key_as))
+                new_fields += ', {}'.format(key)
+                new_placeholders += ',?'
+
+            command = \
+                """
+                ALTER TABLE {schema}.{table} ADD {columns}
+                """.format(schema=self.azure_schema,
+                           table=loading_table,
+                           columns=', '.join(new_columns))
+
+            m_hook.run(command)
+            target_fields += new_fields
+            placeholders += new_placeholders
+
+        insert_query = \
+          """
+          INSERT INTO {schema}.{table} ({columns})
+          VALUES ({placeholders})
+          """.format(schema=self.azure_schema,
+                     table=loading_table,
+                     columns=target_fields,
+                     placeholders=placeholders)
 
         conn = m_hook.get_conn()
         cur = conn.cursor()
