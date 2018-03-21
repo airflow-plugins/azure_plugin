@@ -243,17 +243,18 @@ class S3ToAzureDWOperator(BaseOperator):
         for record in records:
             for key in list(record.keys()):
                 if key not in keys:
-                    keys.append(key)
+                    if key == 'table':
+                        keys.append('_table')
+                    else:
+                        keys.append(key)
                 if key == 'table':
                     record['_table'] = record.pop('table')
-            line_object = default_object.copy()
-            line_object.update(record)
-            output.append([v for k, v in line_object.items()])
 
         logging.info('Key Count: ' + str(len(keys)))
         logging.info('Field Count: ' + str(len(existing_columns)))
 
         missing_keys = list(set(keys) - set(existing_columns))
+
         logging.info('Missing Keys: ' + str(missing_keys))
 
         if missing_keys and self.missing_key_as:
@@ -272,7 +273,11 @@ class S3ToAzureDWOperator(BaseOperator):
                            table=loading_table,
                            columns=', '.join(new_columns))
 
+            for field in missing_keys:
+                default_object[field.lower()] = None
+
             m_hook.run(command)
+
             target_fields += new_fields
             placeholders += new_placeholders
 
@@ -284,6 +289,14 @@ class S3ToAzureDWOperator(BaseOperator):
                      table=loading_table,
                      columns=target_fields,
                      placeholders=placeholders)
+
+        for record in records:
+            for key in list(record.keys()):
+                if key == 'table':
+                    record['_table'] = record.pop('table')
+            line_object = default_object.copy()
+            line_object.update(record)
+            output.append([v for k, v in line_object.items()])
 
         conn = m_hook.get_conn()
         cur = conn.cursor()
